@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, CircleAlert, FlaskConical, Loader2, Play, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { apiRequest } from "@/lib/api";
 
 const responses = [
   {
@@ -46,13 +47,65 @@ export function EvaluationWorkspace() {
   const [running, setRunning] = useState(false);
   const [verdict, setVerdict] = useState("B");
   const [submitted, setSubmitted] = useState(false);
+  const [taskId, setTaskId] = useState("");
+  const [responseIds, setResponseIds] = useState<Record<string, string>>({});
+  const [justification, setJustification] = useState("Response B is better because it passes all tests and correctly merges adjacent intervals. Response A uses a strict comparison and misses the required endpoint edge case.");
+  const [apiMessage, setApiMessage] = useState("");
 
-  function runTests() {
+  useEffect(() => {
+    apiRequest<Array<{ id: string; responses: Array<{ id: string; label: string }> }>>("/api/tasks")
+      .then((tasks) => {
+        const task = tasks[0];
+        if (!task) return;
+        setTaskId(task.id);
+        setResponseIds(Object.fromEntries(task.responses.map((item) => [item.label, item.id])));
+      })
+      .catch(() => setApiMessage("Demo data is available while the API wakes up."));
+  }, []);
+
+  async function runTests() {
     setRunning(true);
+    const token = localStorage.getItem("codejudge_token");
+    if (token && responseIds.A && responseIds.B) {
+      await Promise.all(
+        [responseIds.A, responseIds.B].map((responseId) =>
+          apiRequest("/api/executions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ response_id: responseId }),
+          }),
+        ),
+      ).catch(() => setApiMessage("Using cached demo execution results."));
+    }
     window.setTimeout(() => {
       setRunning(false);
       setRan(true);
-    }, 900);
+    }, 500);
+  }
+
+  async function submitEvaluation() {
+    const token = localStorage.getItem("codejudge_token");
+    if (!token || !taskId) {
+      setApiMessage("Sign in first to save this evaluation.");
+      return;
+    }
+    try {
+      await apiRequest("/api/evaluations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          task_id: taskId,
+          preference: verdict === "A" ? "response_a" : verdict === "B" ? "response_b" : verdict === "Tie" ? "tie" : "both_incorrect",
+          justification,
+          rubric_scores: { correctness_a: 3, correctness_b: 5, readability_a: 4, readability_b: 5 },
+          error_labels: ["missing_edge_case"],
+        }),
+      });
+      setSubmitted(true);
+      setApiMessage("Evaluation saved to PostgreSQL.");
+    } catch (reason) {
+      setApiMessage(reason instanceof Error ? reason.message : "Unable to save evaluation.");
+    }
   }
 
   return (
@@ -119,9 +172,10 @@ export function EvaluationWorkspace() {
               </div>
             ))}
           </div>
-          <Textarea defaultValue="Response B is better because it passes all tests and correctly merges adjacent intervals. Response A uses a strict comparison and misses the required endpoint edge case." className="min-h-28" />
+          <Textarea value={justification} onChange={(event) => setJustification(event.target.value)} className="min-h-28" />
+          {apiMessage && <p className="text-sm text-muted-foreground">{apiMessage}</p>}
           <div className="flex justify-end">
-            <Button onClick={() => setSubmitted(true)} disabled={!ran}><Send /> Submit human verdict</Button>
+            <Button onClick={submitEvaluation} disabled={!ran}><Send /> Submit human verdict</Button>
           </div>
         </CardContent>
       </Card>
